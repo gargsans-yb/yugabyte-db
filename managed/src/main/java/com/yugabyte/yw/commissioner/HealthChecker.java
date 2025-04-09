@@ -817,6 +817,7 @@ public class HealthChecker {
                   params.universe, UniverseConfKeys.healthCheckClockSyncServiceRequired));
         } else {
           nodeInfo.setClockSyncServiceRequired(false);
+          nodeInfo.setCheckTimeDrift(false);
         }
         if (params.universe.isYbcEnabled()) {
           nodeInfo
@@ -831,6 +832,8 @@ public class HealthChecker {
                       : nodeInfo.getYbHomeDir());
         }
         nodeInfo.setOtelCollectorEnabled(params.universe.getUniverseDetails().otelCollectorEnabled);
+        nodeInfo.setClockboundEnabled(
+            params.universe.getUniverseDetails().getPrimaryCluster().userIntent.isUseClockbound());
         nodeMetadata.add(nodeInfo);
       }
     }
@@ -909,8 +912,6 @@ public class HealthChecker {
 
   private void addUnexpectedServersChecks(
       List<NodeData> nodeReports, List<NodeInfo> nodeMetadata, CheckSingleUniverseParams params) {
-    Set<String> checkedNodeIps =
-        nodeMetadata.stream().map(n -> n.nodeHost).collect(Collectors.toSet());
     CheckClusterConsistency.CheckResult checkResult =
         clusterConsistencyChecker.getUniverseCheckResult(params.universe.getUniverseUUID());
     log.debug("Found check result: {}", checkResult);
@@ -925,11 +926,7 @@ public class HealthChecker {
       for (String ip :
           Sets.union(checkResult.getUnknownMasterIps(), checkResult.getUnknownTserverIps())) {
         NodeDetails nodeDetails = params.universe.getNodeByAnyIP(ip);
-        if (nodeDetails != null && checkedNodeIps.contains(nodeDetails.cloudInfo.private_ip)) {
-          continue;
-        }
         log.debug("Found ip with master/tserver running: {} node {}", ip, nodeDetails);
-        Optional<NodeInstance> nodeInstance = NodeInstance.maybeGet(nodeDetails.getNodeUuid());
         NodeData nodeData =
             new NodeData()
                 .setHasError(true)
@@ -998,6 +995,8 @@ public class HealthChecker {
     if (ddlAtomicityCheckEnabled) {
       int ddlAtomicityIntervalSec =
           confGetter.getConfForScope(universe, UniverseConfKeys.ddlAtomicityIntervalSec);
+      nodeCheckTimeoutSec =
+          confGetter.getConfForScope(universe, UniverseConfKeys.nodeCheckTimeoutDdlSec);
 
       Instant lastDdlAtomicitySuccessfulCheckTimestamp =
           ddlAtomicitySuccessfulCheckTimestamp.get(universe.getUniverseUUID());
@@ -1296,6 +1295,7 @@ public class HealthChecker {
     private UUID universeUuid;
     private boolean otelCollectorEnabled;
     private boolean clockSyncServiceRequired = true;
+    private boolean clockboundEnabled = false;
     @JsonIgnore @EqualsAndHashCode.Exclude private NodeDetails nodeDetails;
   }
 

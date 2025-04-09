@@ -21,7 +21,7 @@ yba backup update --uuid <backup-uuid> \
 ### Options
 
 ```
-      --uuid string                    [Required] The UUID of the backup to be edited.
+  -u, --uuid string                    [Required] The UUID of the backup to be edited.
       --time-before-delete-in-ms int   [Optional] Time before delete from the current time in ms.
       --storage-config-name string     [Optional] Change the storage configuration assigned to the backup.
   -h, --help                           help for update
@@ -31,8 +31,9 @@ yba backup update --uuid <backup-uuid> \
 
 ```
   -a, --apiToken string    YugabyteDB Anywhere api token.
-      --config string      Config file, defaults to $HOME/.yba-cli.yaml
+      --config string      Full path to a specific configuration file for YBA CLI. If provided, this takes precedence over the directory specified via --directory, and the generated files are added to the same path. If not provided, the CLI will look for '.yba-cli.yaml' in the directory specified by --directory. Defaults to '$HOME/.yba-cli/.yba-cli.yaml'.
       --debug              Use debug mode, same as --logLevel debug.
+      --directory string   Directory containing YBA CLI configuration and generated files. If specified, the CLI will look for a configuration file named '.yba-cli.yaml' in this directory. Defaults to '$HOME/.yba-cli/'.
       --disable-color      Disable colors in output. (default false)
   -H, --host string        YugabyteDB Anywhere Host (default "http://localhost:9000")
   -l, --logLevel string    Select the desired log level format. Allowed values: debug, info, warn, error, fatal. (default "info")

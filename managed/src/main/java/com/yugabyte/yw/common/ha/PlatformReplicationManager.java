@@ -24,6 +24,8 @@ import com.yugabyte.yw.common.PlatformScheduler;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.PrometheusConfigHelper;
 import com.yugabyte.yw.common.ShellResponse;
+import com.yugabyte.yw.common.config.GlobalConfKeys;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
 import com.yugabyte.yw.common.services.FileDataService;
 import com.yugabyte.yw.common.utils.FileUtils;
 import com.yugabyte.yw.models.HighAvailabilityConfig;
@@ -76,6 +78,8 @@ public class PlatformReplicationManager {
 
   private final ConfigHelper configHelper;
 
+  private final RuntimeConfGetter confGetter;
+
   private static final String INSTANCE_ADDRESS_LABEL = "instance_address";
 
   public static final Gauge HA_LAST_BACKUP_TIME =
@@ -93,12 +97,14 @@ public class PlatformReplicationManager {
       PlatformReplicationHelper replicationHelper,
       FileDataService fileDataService,
       PrometheusConfigHelper prometheusConfigHelper,
-      ConfigHelper configHelper) {
+      ConfigHelper configHelper,
+      RuntimeConfGetter confGetter) {
     this.platformScheduler = platformScheduler;
     this.replicationHelper = replicationHelper;
     this.fileDataService = fileDataService;
     this.prometheusConfigHelper = prometheusConfigHelper;
     this.configHelper = configHelper;
+    this.confGetter = confGetter;
     this.schedule = new AtomicReference<>();
   }
 
@@ -702,9 +708,14 @@ public class PlatformReplicationManager {
     private final String outputDirectory;
 
     public CreatePlatformBackupParams() {
-      this.excludePrometheus = true;
-      this.excludeReleases = true;
-      this.outputDirectory = replicationHelper.getBackupDir().toString();
+      this(true, true, replicationHelper.getBackupDir().toString());
+    }
+
+    public CreatePlatformBackupParams(
+        boolean excludePrometheus, boolean excludeReleases, String outputDirectory) {
+      this.excludePrometheus = excludePrometheus;
+      this.excludeReleases = excludeReleases;
+      this.outputDirectory = outputDirectory;
     }
 
     @Override
@@ -738,9 +749,11 @@ public class PlatformReplicationManager {
 
     // Where to input a previously taken platform backup from.
     private final File input;
+    private final boolean k8sRestoreYbaDbOnRestart;
 
-    public RestorePlatformBackupParams(File input) {
+    public RestorePlatformBackupParams(File input, boolean k8sRestoreYbaDbOnRestart) {
       this.input = input;
+      this.k8sRestoreYbaDbOnRestart = k8sRestoreYbaDbOnRestart;
     }
 
     @Override
@@ -757,6 +770,9 @@ public class PlatformReplicationManager {
         commandArgs.addAll(getYbaInstallerArgs());
         commandArgs.add("--destination");
         commandArgs.add(replicationHelper.getBaseInstall());
+      } else if (k8sRestoreYbaDbOnRestart
+          && confGetter.getGlobalConf(GlobalConfKeys.k8sYbaRestoreSkipDumpFileDelete)) {
+        commandArgs.add("--skip_dump_file_delete");
       }
 
       return commandArgs;
@@ -787,9 +803,11 @@ public class PlatformReplicationManager {
    * @param input is the path to the backup to be restored
    * @return the output/results of running the script
    */
-  public boolean restoreBackup(File input) {
+  public boolean restoreBackup(File input, boolean k8sRestoreYbaDbOnRestart) {
     log.info("Restoring platform backup...");
-    ShellResponse response = replicationHelper.runCommand(new RestorePlatformBackupParams(input));
+    ShellResponse response =
+        replicationHelper.runCommand(
+            new RestorePlatformBackupParams(input, k8sRestoreYbaDbOnRestart));
     if (response.code != 0) {
       log.error("Restore failed: {}", response.message);
     } else {

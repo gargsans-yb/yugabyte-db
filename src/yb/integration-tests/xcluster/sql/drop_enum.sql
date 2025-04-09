@@ -18,3 +18,13 @@ DROP TYPE bogon3;
 
 -- this also drops DOMAIN rgb and TABLE enumtest.
 DROP TYPE rainbow CASCADE;
+
+DROP TYPE colors;
+DROP TYPE paint_color;
+
+DROP TYPE empty_enum;
+
+DROP TYPE huge_label;
+
+DROP TYPE schema1.enum_in_schema;
+DROP SCHEMA schema2 CASCADE;

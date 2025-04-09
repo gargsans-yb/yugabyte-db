@@ -25,18 +25,15 @@
  *-------------------------------------------------------------------------
  */
 
+#include "postgres_fe.h"
+
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "postgres_fe.h"
-
 #include "common/pg_yb_common.h"
-
 #include "utils/elog.h"
-
-const bool	kTestOnlyUseOSDefaultCollation = false;
 
 bool
 YBCIsEnvVarTrue(const char *env_var_name)
@@ -309,4 +306,15 @@ YBGetDatabaseOidFromEnv(const char *database_name)
 			return (Oid) full_oid;
 	}
 	return InvalidOid;
+}
+
+bool
+YBQueryDiagnosticsTestRaceCondition()
+{
+	static int cached_value = -1;
+	if (cached_value == -1)
+	{
+		cached_value = YBCIsEnvVarTrue("FLAGS_TEST_ysql_yb_query_diagnostics_race_condition");
+	}
+	return cached_value;
 }

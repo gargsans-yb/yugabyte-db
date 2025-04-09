@@ -873,6 +873,7 @@ public class NodeManager extends DevopsBase {
     allowOverrideAll |= config.getBoolean("yb.cloud.enabled");
 
     GFlagsUtil.processUserGFlags(
+        universe,
         node,
         gflags,
         GFlagsUtil.getAllDefaultGFlags(
@@ -951,17 +952,14 @@ public class NodeManager extends DevopsBase {
       }
       Pair<String, String> ybcPackageDetails =
           Util.getYbcPackageDetailsFromYbServerPackage(ybServerPackage);
+      String stableYbc = confGetter.getGlobalConf(GlobalConfKeys.ybcStableVersion);
       ReleaseManager.ReleaseMetadata releaseMetadata =
           releaseManager.getYbcReleaseByVersion(
-              taskParam.getYbcSoftwareVersion(),
-              ybcPackageDetails.getFirst(),
-              ybcPackageDetails.getSecond());
+              stableYbc, ybcPackageDetails.getFirst(), ybcPackageDetails.getSecond());
 
       if (releaseMetadata == null) {
         throw new RuntimeException(
-            String.format(
-                "Ybc package metadata: %s cannot be empty with ybc enabled",
-                taskParam.getYbcSoftwareVersion()));
+            String.format("Ybc package metadata: %s cannot be empty with ybc enabled", stableYbc));
       }
 
       if (arch != null) {
@@ -1775,6 +1773,11 @@ public class NodeManager extends DevopsBase {
     commandArgs.add("--remote_tmp_dir");
     if (node == null) {
       Cluster cluster = universe.getCluster(nodeTaskParam.placementUuid);
+      if (cluster == null) {
+        // Cluster may not yet be added (frozen) to the universe e.g in RR cluster addition.
+        // Use the primary cluster to just get the temp directory in that case.
+        cluster = universe.getUniverseDetails().getPrimaryCluster();
+      }
       commandArgs.add(
           GFlagsUtil.getCustomTmpDirectory(
               universe,
@@ -1804,8 +1807,7 @@ public class NodeManager extends DevopsBase {
     List<String> commandArgs = new ArrayList<>();
     UserIntent userIntent = getUserIntentFromParams(nodeTaskParam);
     ImageBundle.NodeProperties toOverwriteNodeProperties = null;
-    UUID imageBundleUUID =
-        Util.retreiveImageBundleUUID(arch, userIntent, nodeTaskParam.getProvider());
+    UUID imageBundleUUID = getImageBundleUUID(arch, nodeTaskParam, userIntent);
     if (imageBundleUUID != null) {
       Region region = nodeTaskParam.getRegion();
       toOverwriteNodeProperties =
@@ -1973,6 +1975,10 @@ public class NodeManager extends DevopsBase {
               // Backward compatiblity.
               imageBundleDefaultImage = taskParam.getRegion().getYbImage();
             }
+            log.debug(
+                "Machine image params {} default {}",
+                taskParam.getMachineImage(),
+                imageBundleDefaultImage);
             String ybImage =
                 Optional.ofNullable(taskParam.getMachineImage()).orElse(imageBundleDefaultImage);
             if (ybImage != null && !ybImage.isEmpty()) {
@@ -2228,10 +2234,6 @@ public class NodeManager extends DevopsBase {
           }
           if (taskParam.useSystemd) {
             commandArgs.add("--systemd_services");
-          }
-          if (taskParam.nodeUuid != null) {
-            commandArgs.add("--node_uuid");
-            commandArgs.add(taskParam.nodeUuid.toString());
           }
           if (taskParam.deviceInfo != null) {
             commandArgs.addAll(getDeviceArgs(taskParam));
@@ -2645,6 +2647,10 @@ public class NodeManager extends DevopsBase {
       }
       return localNodeManager.nodeCommand(type, nodeTaskParam, commandArgs);
     }
+    if (nodeTaskParam.nodeUuid != null) {
+      commandArgs.add("--node_uuid");
+      commandArgs.add(nodeTaskParam.nodeUuid.toString());
+    }
     commandArgs.add(nodeTaskParam.nodeName);
     try {
       Map<String, String> envVars =
@@ -2672,6 +2678,30 @@ public class NodeManager extends DevopsBase {
         }
       }
     }
+  }
+
+  /**
+   * Get current image bundle UUID. Checking these in order: 1) provided in params 2) used in
+   * userIntent 3) get default bundle for provider
+   *
+   * @param arch
+   * @param nodeTaskParam
+   * @param userIntent
+   * @return
+   */
+  private UUID getImageBundleUUID(
+      Architecture arch, NodeTaskParams nodeTaskParam, UserIntent userIntent) {
+    UUID imageBundleUUID = null;
+    if (nodeTaskParam instanceof AnsibleCreateServer.Params) {
+      imageBundleUUID = ((AnsibleCreateServer.Params) nodeTaskParam).imageBundleUUID;
+    }
+    if (nodeTaskParam instanceof AnsibleSetupServer.Params) {
+      imageBundleUUID = ((AnsibleSetupServer.Params) nodeTaskParam).imageBundleUUID;
+    }
+    if (imageBundleUUID == null) {
+      imageBundleUUID = Util.retreiveImageBundleUUID(arch, userIntent, nodeTaskParam.getProvider());
+    }
+    return imageBundleUUID;
   }
 
   private void appendCertPathsToCheck(List<String> commandArgs, UUID rootCA, boolean isClient) {

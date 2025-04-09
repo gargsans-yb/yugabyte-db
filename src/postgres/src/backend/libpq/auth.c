@@ -41,18 +41,16 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
-#include "utils/builtins.h"
 
+/* YB includes */
 #include "access/htup_details.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_yb_role_profile.h"
 #include "commands/yb_profile.h"
 #include "pg_yb_utils.h"
+#include "utils/builtins.h"	/* TODO: may not be needed */
 #include "utils/syscache.h"
-#include "pg_yb_utils.h"
 #include "yb/yql/pggate/ybc_pggate.h"
-
-/* Yugabyte includes */
-#include "catalog/pg_authid.h"
 
 /*----------------------------------------------------------------
  * Global authentication functions
@@ -468,7 +466,8 @@ ClientAuthentication(Port *port)
 	 */
 	if (port->hba->clientcert != clientCertOff)
 	{
-		if (YbIsClientYsqlConnMgr() && yb_auth_passthrough == true)
+		if (YbIsClientYsqlConnMgr() &&
+			(yb_auth_passthrough == true || yb_is_auth_backend == true))
 		{
 			/*
 			 * Ysql Connection Manager does not know what is the
@@ -477,7 +476,7 @@ ClientAuthentication(Port *port)
 			 */
 			ereport(FATAL,
 					(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-					 errmsg("cert authentication is not supported")));
+					 errmsg("cert authentication is not supported with connection manager")));
 			return;
 		}
 
@@ -1024,15 +1023,13 @@ CheckPWChallengeAuth(Port *port, const char **logdetail)
 
 	if (shadow_pass)
 		pfree(shadow_pass);
-
-	/*
-	 * If get_role_password() returned error, return error, even if the
-	 * authentication succeeded.
-	 */
-	if (!shadow_pass)
+	else
 	{
+		/*
+		 * If get_role_password() returned error, authentication better not
+		 * have succeeded.
+		 */
 		Assert(auth_result != STATUS_OK);
-		return STATUS_ERROR;
 	}
 
 	if (auth_result == STATUS_OK)

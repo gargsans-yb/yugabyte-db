@@ -35,6 +35,7 @@
 #include <mutex>
 #include <vector>
 
+#include "yb/common/version_info.h"
 #include "yb/common/wire_protocol.h"
 
 #include "yb/gutil/map-util.h"
@@ -66,9 +67,7 @@ DEFINE_RUNTIME_AUTO_bool(persist_tserver_registry, kLocalPersisted, false, true,
     "controls whether to reload the map of registered tservers from the sys catalog when reloading "
     "the sys catalog.");
 
-DEFINE_test_flag(bool, enable_ysql_operation_lease, false,
-    "Enables the client operation lease. The client operation lease must be held by a tserver to "
-    "host pg sessions. It is refreshed by the master leader.");
+DEFINE_RUNTIME_bool(skip_tserver_version_checks, false, "Skip all tserver version checks");
 
 namespace yb::master {
 namespace {
@@ -96,9 +95,10 @@ std::function<bool(const ServerRegistrationPB&)> GetHostPortCheckerFunction(
 class TSDescriptorLoader : public Visitor<PersistentTServerInfo> {
  public:
   explicit TSDescriptorLoader(
-      const CloudInfoPB& local_cloud_info, rpc::ProxyCache* proxy_cache,
-      HybridTime load_time) noexcept
-      : local_cloud_info_(local_cloud_info), proxy_cache_(proxy_cache), load_time_(load_time) {}
+      const CloudInfoPB& local_cloud_info, rpc::ProxyCache* proxy_cache) noexcept
+      : local_cloud_info_(local_cloud_info),
+        proxy_cache_(proxy_cache),
+        load_time_(MonoTime::Now()) {}
 
   TSDescriptorMap&& TakeMap();
 
@@ -109,7 +109,7 @@ class TSDescriptorLoader : public Visitor<PersistentTServerInfo> {
   TSDescriptorMap map_;
   const CloudInfoPB& local_cloud_info_;
   rpc::ProxyCache* proxy_cache_;
-  HybridTime load_time_;
+  MonoTime load_time_;
 };
 
 template <typename... Items>
@@ -117,8 +117,7 @@ Status UpsertIfRequired(const LeaderEpoch& epoch, SysCatalogTable& sys_catalog, 
 
 }  // namespace
 
-TSManager::TSManager(SysCatalogTable& sys_catalog, server::Clock& clock) noexcept
-    : sys_catalog_(sys_catalog), clock_(clock) {}
+TSManager::TSManager(SysCatalogTable& sys_catalog) noexcept : sys_catalog_(sys_catalog) {}
 
 Result<TSDescriptorPtr> TSManager::LookupTS(const NodeInstancePB& instance) const {
   SharedLock<decltype(map_lock_)> l(map_lock_);
@@ -231,19 +230,17 @@ Status TSManager::RegisterFromRaftConfig(
   return Status::OK();
 }
 
-Result<HeartbeatResult>
-TSManager::LookupAndUpdateTSFromHeartbeat(
+Result<TSDescriptorPtr> TSManager::LookupAndUpdateTSFromHeartbeat(
     const TSHeartbeatRequestPB& heartbeat_request, const LeaderEpoch& epoch) const {
   auto desc = VERIFY_RESULT(LookupTS(heartbeat_request.common().ts_instance()));
   auto lock = desc->LockForWrite();
-  auto lease_delta = VERIFY_RESULT(
-      desc->UpdateFromHeartbeat(heartbeat_request, lock, clock_.Now()));
+  RETURN_NOT_OK(desc->UpdateFromHeartbeat(heartbeat_request, lock));
   RETURN_NOT_OK(UpsertIfRequired(epoch, sys_catalog_, desc));
   lock.Commit();
-  return HeartbeatResult(std::move(desc), std::move(lease_delta));
+  return desc;
 }
 
-Result<HeartbeatResult> TSManager::RegisterFromHeartbeat(
+Result<TSDescriptorPtr> TSManager::RegisterFromHeartbeat(
     const TSHeartbeatRequestPB& heartbeat_request, const LeaderEpoch& epoch,
     CloudInfoPB&& local_cloud_info, rpc::ProxyCache* proxy_cache) {
   return RegisterInternal(
@@ -251,29 +248,27 @@ Result<HeartbeatResult> TSManager::RegisterFromHeartbeat(
       std::cref(heartbeat_request), std::move(local_cloud_info), epoch, proxy_cache);
 }
 
-Result<HeartbeatResult> TSManager::RegisterInternal(
+Result<TSDescriptorPtr> TSManager::RegisterInternal(
     const NodeInstancePB& instance, const TSRegistrationPB& registration,
     std::optional<std::reference_wrapper<const TSHeartbeatRequestPB>> request,
     CloudInfoPB&& local_cloud_info, const LeaderEpoch& epoch, rpc::ProxyCache* proxy_cache) {
   TSCountCallback callback;
-  HeartbeatResult result;
-  auto registered_through_heartbeat = RegisteredThroughHeartbeat(request.has_value());
+  TSDescriptorPtr ts_desc = nullptr;
   {
     MutexLock l(registration_lock_);
     auto reg_data = VERIFY_RESULT(ComputeRegistrationMutationData(
         instance, registration, std::move(local_cloud_info), proxy_cache,
-        registered_through_heartbeat));
+        RegisteredThroughHeartbeat(request.has_value())));
     if (request.has_value()) {
-      result.lease_update = VERIFY_RESULT(reg_data.desc->UpdateFromHeartbeat(
-          *request, reg_data.registered_desc_lock, clock_.Now()));
+      RETURN_NOT_OK(reg_data.desc->UpdateFromHeartbeat(*request, reg_data.registered_desc_lock));
     }
-    std::tie(result.desc, callback) =
+    std::tie(ts_desc, callback) =
         VERIFY_RESULT(DoRegistrationMutation(instance, registration, std::move(reg_data), epoch));
   }
   if (callback) {
     callback();
   }
-  return result;
+  return ts_desc;
 }
 
 Result<std::pair<TSDescriptorPtr, TSCountCallback>> TSManager::DoRegistrationMutation(
@@ -358,12 +353,6 @@ void TSManager::GetAllReportedDescriptors(TSDescriptorVector* descs) const {
                    -> bool { return ts->IsLive() && ts->has_tablet_report(); }, descs);
 }
 
-TSDescriptorVector TSManager::GetAllDescriptorsWithALiveLease() const {
-  TSDescriptorVector descs;
-  GetDescriptors([](const auto& ts) -> bool { return ts->HasLiveClientOperationLease(); }, &descs);
-  return descs;
-}
-
 bool TSManager::IsTsInCluster(const TSDescriptorPtr& ts, const std::string& cluster_uuid) {
   return ts->placement_uuid() == cluster_uuid;
 }
@@ -406,11 +395,6 @@ void TSManager::SetTSCountCallback(int min_count, TSCountCallback callback) {
   ts_count_callback_min_count_ = min_count;
 }
 
-void TSManager::SetLeaseExpiredCallback(LeaseExpiredCallback callback) {
-  std::lock_guard l(registration_lock_);
-  lease_expired_callback_ = std::move(callback);
-}
-
 size_t TSManager::NumDescriptors() const {
   SharedLock<decltype(map_lock_)> l(map_lock_);
   return NumDescriptorsUnlocked();
@@ -424,40 +408,22 @@ size_t TSManager::NumLiveDescriptors() const {
 }
 
 Status TSManager::MarkUnresponsiveTServers(const LeaderEpoch& epoch) {
-  std::unordered_map<std::string, uint64_t> uuid_to_expired_lease_epoch;
+  auto current_time = MonoTime::Now();
   {
     SharedLock<decltype(map_lock_)> l(map_lock_);
-    auto mono_time = MonoTime::Now();
-    auto hybrid_time = clock_.Now();
     std::vector<TSDescriptor*> updated_descs;
     std::vector<TSDescriptor::WriteLock> cow_locks;
     for (const auto& [id, desc] : servers_by_id_) {
-      auto update_opt = desc->MaybeUpdateLiveness(mono_time, hybrid_time);
-      if (update_opt)  {
-        auto [lock, expired_lease_opt] = std::move(update_opt).value();
+      auto lock_opt = desc->MaybeUpdateLiveness(current_time);
+      if (lock_opt) {
         updated_descs.push_back(desc.get());
-        cow_locks.push_back(std::move(lock));
-        if (expired_lease_opt) {
-          uuid_to_expired_lease_epoch[id] = *expired_lease_opt;
-        }
+        cow_locks.push_back(std::move(lock_opt).value());
       }
     }
     RETURN_NOT_OK(UpsertIfRequired(epoch, sys_catalog_, updated_descs));
     for (auto& l : cow_locks) {
       l.Commit();
     }
-  }
-  if (uuid_to_expired_lease_epoch.empty()) {
-    return Status::OK();
-  }
-  LeaseExpiredCallback local_lease_expired_callback;
-  {
-    std::lock_guard l(registration_lock_);
-    local_lease_expired_callback = lease_expired_callback_;
-  }
-  for (const auto& [uuid, lease_epoch] : uuid_to_expired_lease_epoch) {
-    // TODO(zdrudi): We should spawn a task here instead of making a one-off call.
-    local_lease_expired_callback(uuid, lease_epoch, epoch);
   }
   return Status::OK();
 }
@@ -467,7 +433,7 @@ Status TSManager::RunLoader(
   if (!GetAtomicFlag(&FLAGS_persist_tserver_registry)) {
     return Status::OK();
   }
-  auto loader = std::make_unique<TSDescriptorLoader>(cloud_info, proxy_cache, clock_.Now());
+  auto loader = std::make_unique<TSDescriptorLoader>(cloud_info, proxy_cache);
   RETURN_NOT_OK(sys_catalog_.Visit(loader.get()));
   MutexLock l_reg(registration_lock_);
   std::lock_guard l_map(map_lock_);
@@ -538,11 +504,35 @@ Status TSManager::RemoveTabletServer(
   return Status::OK();
 }
 
-HeartbeatResult::HeartbeatResult() : desc(nullptr), lease_update(std::nullopt) { }
+Status TSManager::ValidateAllTserverVersions(ValidateVersionInfoOp op) const {
+  if (FLAGS_skip_tserver_version_checks) {
+    return Status::OK();
+  }
 
-HeartbeatResult::HeartbeatResult(
-    TSDescriptorPtr&& desc_param, std::optional<ClientOperationLeaseUpdate>&& lease_update_param)
-    : desc(std::move(desc_param)), lease_update(std::move(lease_update_param)) {}
+  std::vector<std::string> invalid_tservers;
+  SharedLock l(map_lock_);
+  for (const auto& [ts_id, ts_dsc] : servers_by_id_) {
+    auto l = ts_dsc->LockForRead();
+    if (!l->IsLive()) {
+      // This is probably some old tserver that has been dead for hours. When it comes back up we
+      // will validate it, so it can be ignored here.
+      continue;
+    }
+    auto version_info_opt =
+        l->pb.has_version_info() ? std::optional(std::cref(l->pb.version_info())) : std::nullopt;
+    if (!VersionInfo::ValidateVersion(version_info_opt, op)) {
+      invalid_tservers.push_back(Format(
+          "[TS $0; Version $1]", ts_dsc->ToString(),
+          version_info_opt ? version_info_opt->get().ShortDebugString() : "<NA>"));
+    }
+  }
+
+  SCHECK_FORMAT(
+      invalid_tservers.empty(), IllegalState, "yb-tserver(s) not on the correct version: $0",
+      yb::ToString(invalid_tservers));
+
+  return Status::OK();
+}
 
 namespace {
 

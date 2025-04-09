@@ -52,9 +52,11 @@ class YsqlCatalogConfig {
   // Are we running a major catalog upgrade or rollback?
   IsOperationDoneResult IsYsqlMajorCatalogUpgradeDone() const EXCLUDES(mutex_);
 
-  YsqlMajorCatalogUpgradeInfoPB::State GetMajorCatalogUpgradeState() const EXCLUDES(mutex_);
+  YsqlMajorCatalogUpgradeInfoPB_State GetMajorCatalogUpgradeState() const EXCLUDES(mutex_);
+
   Status GetMajorCatalogUpgradePreviousError() const EXCLUDES(mutex_);
 
+  bool IsPreviousVersionCatalogCleanupRequired() const EXCLUDES(mutex_);
   class Updater {
    public:
     ~Updater() = default;

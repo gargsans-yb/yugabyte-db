@@ -17,9 +17,10 @@
 # Simple linter to make sure a file is uniquely sorted.
 set -u
 
-. "${BASH_SOURCE%/*}/util.sh"
+. "${BASH_SOURCE%/*}/common.sh"
 
-lineno=$(diff "$1" <(LC_ALL=C sort -u "$1") | head -1 | grep -Eo '^[0-9]+')
+lineno=$(diff "$1" <(sort -u "$1") | head -1 | grep -Eo '^[0-9]+')
 if [ -n "$lineno" ]; then
-  echo "error:file_not_unique_sorted:$lineno:$(sed -n "$lineno"p "$1")"
+  echo 'error:file_not_unique_sorted:This file should be uniquely sorted:'\
+"$lineno:$(sed -n "$lineno"p "$1")"
 fi

@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
-import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
@@ -149,12 +148,12 @@ public class TestPgYbStat extends BasePgSQLTest {
     return false;
   }
 
-  @Ignore("#24297 - skipping until yb_terminated_queries is enabled")
   @Test
   public void testYbTerminatedQueriesMultipleCauses() throws Exception {
     // (DB-12741) Test is flaky with connection manager irrespective of warmup
     // mode. Disable the test for now when running with connection manager.
-    assumeFalse(BasePgSQLTest.INCORRECT_CONN_STATE_BEHAVIOR, isTestRunningWithConnectionManager());
+    skipYsqlConnMgr(BasePgSQLTest.INCORRECT_CONN_STATE_BEHAVIOR,
+        isTestRunningWithConnectionManager());
 
     // We need to restart the cluster to wipe the state currently contained in yb_terminated_queries
     // that can potentially be leftover from another test in this class. This would let us start
@@ -214,7 +213,6 @@ public class TestPgYbStat extends BasePgSQLTest {
     }
   }
 
-  @Ignore("#24297 - skipping until yb_terminated_queries is enabled")
   @Test
   public void testYbTerminatedQueriesOverflow() throws Exception {
     // We need to restart the cluster to wipe the state currently contained in yb_terminated_queries
@@ -257,7 +255,6 @@ public class TestPgYbStat extends BasePgSQLTest {
     }
   }
 
-  @Ignore("#24297 - skipping until yb_terminated_queries is enabled")
   @Test
   public void testYBMultipleConnections() throws Exception {
     // We need to restart the cluster to wipe the state currently contained in yb_terminated_queries
@@ -296,7 +293,6 @@ public class TestPgYbStat extends BasePgSQLTest {
       }));
   }
 
-  @Ignore("#24297 - skipping until yb_terminated_queries is enabled")
   @Test
   public void testYBDBFiltering() throws Exception {
     // We need to restart the cluster to wipe the state currently contained in yb_terminated_queries
@@ -351,6 +347,66 @@ public class TestPgYbStat extends BasePgSQLTest {
           if (!result.next()) return false;
           if (!statement2.equals(result.getString("query_text"))) return false;
           return !result.next();
+        }));
+    }
+  }
+
+  @Test
+  public void testYbTerminatedQueriesEmpty() throws Exception {
+    // We need to restart the cluster to wipe the state currently contained in yb_terminated_queries
+    // that can potentially be leftover from another test in this class. This would let us start
+    // with a clean slate.
+    restartCluster();
+    // We expect the yb_terminated_queries view to be empty.
+    assertTrue(waitUntilConditionSatisfiedOrTimeout(
+      "SELECT query_text FROM yb_terminated_queries", connection,
+      (ResultSet resultSet) -> {
+        assertFalse("yb_terminated_queries view should be empty.",
+            resultSet.next());
+        return true;
+    }));
+  }
+
+  @Test
+  public void testYbTerminatedQueriesPersistence() throws Exception {
+    // We need to restart the cluster to wipe the state currently contained in yb_terminated_queries
+    // that can potentially be leftover from another test in this class. This would let us start
+    // with a clean slate.
+    restartCluster();
+    setupMinTempFileConfigs(connection);
+
+    final int num_queries = 100;
+
+    try (Statement statement = connection.createStatement()) {
+      for (int i = 0; i < num_queries; i++) {
+        final String query = String.format("SELECT * FROM generate_series(0, 1000000 + %d)", i);
+        executeQueryAndExpectTempFileLimitExceeded(query, connection);
+
+        if (i == num_queries / 2)
+        {
+          miniCluster.restart();
+          connection = getConnectionBuilder().connect();
+          setupMinTempFileConfigs(connection);
+        }
+      }
+
+      // Restarting the cluster without wiping previously reported terminated queries.
+      miniCluster.restart();
+
+      // Re-establishing a connection to the cluster.
+      connection = getConnectionBuilder().connect();
+
+      // Terminated queries reported before cluster restart should be persistent after the restart.
+      assertTrue(waitUntilConditionSatisfiedOrTimeout(
+        "SELECT query_text FROM yb_terminated_queries", connection,
+        (ResultSet resultSet) -> {
+          for (int i = 0; i < num_queries; i++) {
+            String expected_query = String.format("SELECT * FROM generate_series(0, 1000000 + %d)",
+                                                  i);
+            if (!resultSet.next() || !expected_query.equals(resultSet.getString("query_text")))
+              return false;
+          }
+          return true;
         }));
     }
   }

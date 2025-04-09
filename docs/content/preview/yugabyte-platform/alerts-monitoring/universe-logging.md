@@ -16,9 +16,9 @@ type: docs
 
 Export YSQL database logs to third-party tools for security monitoring, to build operations and health dashboards, troubleshooting, and more. You can export the following types of logs:
 
-- Database audit logging. Using the [PostgreSQL Audit Extension](https://www.pgaudit.org/#) ([pgaudit](https://github.com/pgaudit/pgaudit/blob/1.3.2/README.md)), the audit log provides the exact database transactions, which is a compliance requirement for government, financial, or ISO certifications.
+- Database audit logging. Using the [PostgreSQL Audit Extension](https://www.pgaudit.org/#) ([pgaudit](https://github.com/pgaudit/pgaudit/blob/1.7.0/README.md)), the audit log provides the exact database transactions, which is a compliance requirement for government, financial, or ISO certifications.
 
-Note that YugabyteDB is based on PostgreSQL 11 and uses PostgreSQL Audit Extension v1.3.2.
+Note that YugabyteDB v2.25 is based on PostgreSQL 15 and uses pgaudit v1.7.0; earlier versions are based on PostgreSQL 11 and use pgaudit v1.3.2.
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ If you want to set pgaudit.log_level to a [severity level](https://www.postgresq
 
 ## Limitations
 
-- Log export is only supported for cloud-based universes and automatically provisioned on-premises universes. Manually provisioned universes and Kubernetes universes are not supported.
+- Kubernetes universes are not supported.
 - Only YSQL database audit logs can be exported, not YCQL.
 
 ## Best practices

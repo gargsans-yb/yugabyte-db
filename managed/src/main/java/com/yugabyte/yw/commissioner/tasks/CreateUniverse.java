@@ -13,11 +13,14 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableMap;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
+import com.yugabyte.yw.commissioner.Common.CloudType;
 import com.yugabyte.yw.commissioner.ITask.Abortable;
 import com.yugabyte.yw.commissioner.ITask.Retryable;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
 import com.yugabyte.yw.common.PlacementInfoUtil;
+import com.yugabyte.yw.common.config.CustomerConfKeys;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
+import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.LoadBalancerConfig;
 import com.yugabyte.yw.models.helpers.LoadBalancerPlacement;
@@ -56,6 +59,20 @@ public class CreateUniverse extends UniverseDefinitionTaskBase {
     if (isFirstTry) {
       // Verify the task params.
       verifyParams(UniverseOpType.CREATE);
+      Universe universe = Universe.getOrBadRequest(taskParams().getUniverseUUID());
+      Customer customer = Customer.get(universe.getCustomerId());
+      if (!confGetter.getConfForScope(customer, CustomerConfKeys.useAnsibleProvisioning)) {
+        for (Cluster cluster : taskParams().clusters) {
+          // Local provider can still use cron.
+          if (!cluster.userIntent.useSystemd
+              && cluster.userIntent.providerType != CloudType.local) {
+            log.warn(
+                "cron based universe cannot be created with YNP, will fallback to ansible "
+                    + "provisioning");
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -152,10 +169,12 @@ public class CreateUniverse extends UniverseDefinitionTaskBase {
 
       retrievePasswordsIfNeeded();
 
+      createPersistUseClockboundTask();
+
       createInstanceExistsCheckTasks(universe.getUniverseUUID(), taskParams(), universe.getNodes());
 
       // Create preflight node check tasks for on-prem nodes.
-      createPreflightNodeCheckTasks(universe, taskParams().clusters);
+      createPreflightNodeCheckTasks(taskParams().clusters);
 
       // Create certificate config check tasks for on-prem nodes.
       createCheckCertificateConfigTask(universe, taskParams().clusters);
@@ -213,6 +232,9 @@ public class CreateUniverse extends UniverseDefinitionTaskBase {
           createLoadBalancerMap(taskParams(), null, null, null);
       createManageLoadBalancerTasks(loadBalancerMap);
 
+      // Marks the update of this universe as a success only if all the tasks before it succeeded.
+      createMarkUniverseUpdateSuccessTasks()
+          .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
       // Run all the tasks.
       getRunnableTask().runSubTasks();
     } catch (Throwable t) {

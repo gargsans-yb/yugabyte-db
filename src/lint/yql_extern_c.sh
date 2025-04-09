@@ -17,14 +17,18 @@
 # Simple linter for checking the filename of *.h files in src/yb/yql.
 set -euo pipefail
 
-. "${BASH_SOURCE%/*}/util.sh"
+. "${BASH_SOURCE%/*}/common.sh"
 
 if grep -q '^extern "C" {$' "$1"; then
   if [[ "$1" != */ybc_*.h ]]; then
-    echo "error:missing_ybc_in_filename:1:$(head -1 "$1")"
+    echo 'error:missing_ybc_in_filename:'\
+'This file should have "ybc_" prefix because of extern "C":'\
+"1:$(head -1 "$1")"
   fi
 else
   if [[ "$1" == */ybc_*.h ]]; then
-    echo "error:bad_ybc_in_filename:1:$(head -1 "$1")"
+    echo 'error:bad_ybc_in_filename:'\
+'This file should not have "ybc_" prefix because of lack of extern "C":'\
+"1:$(head -1 "$1")"
   fi
 fi

@@ -23,55 +23,52 @@
 
 #include "postgres.h"
 
+#include <execinfo.h>
+
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
+#include "access/yb_scan.h"
+#include "catalog/catalog.h"
 #include "catalog/indexing.h"
-#include "catalog/pg_authid_d.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_auth_members_d.h"
+#include "catalog/pg_authid_d.h"
+#include "catalog/pg_database.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/pg_shseclabel_d.h"
 #include "catalog/pg_tablespace_d.h"
+#include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_yb_role_profile.h"
 #include "catalog/pg_yb_role_profile_d.h"
+#include "catalog/yb_catalog_version.h"
 #include "catalog/yb_type.h"
-#include "commands/yb_profile.h"
-#include "utils/relcache.h"
-#include "utils/rel.h"
-#include "utils/lsyscache.h"
-#include "nodes/execnodes.h"
-#include "nodes/nodeFuncs.h"
 #include "commands/dbcommands.h"
+#include "commands/trigger.h"
+#include "commands/yb_profile.h"
 #include "executor/executor.h"
 #include "executor/tuptable.h"
 #include "executor/ybExpr.h"
 #include "executor/ybModifyTable.h"
 #include "miscadmin.h"
-#include "catalog/catalog.h"
-#include "catalog/pg_attribute.h"
-#include "catalog/pg_namespace.h"
-#include "catalog/pg_database.h"
-#include "catalog/yb_catalog_version.h"
+#include "nodes/execnodes.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/ybplan.h"
+#include "pg_yb_utils.h"
+#include "tcop/pquery.h"
+#include "utils/builtins.h"
 #include "utils/catcache.h"
 #include "utils/inval.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/relcache.h"
-#include "executor/tuptable.h"
-#include "executor/ybExpr.h"
-#include "optimizer/ybplan.h"
-#include "tcop/pquery.h"
-
 #include "utils/syscache.h"
 #include "yb/yql/pggate/ybc_pggate.h"
-#include "pg_yb_utils.h"
-#include "access/yb_scan.h"
-
-#include <execinfo.h>
-
-/* Yugabyte includes */
-#include "utils/builtins.h"
 
 bool		yb_disable_transactional_writes = false;
 bool		yb_enable_upsert_mode = false;
+bool		yb_fast_path_for_colocated_copy = false;
 
 /*
  * Hack to ensure that the next CommandCounterIncrement() will call
@@ -277,9 +274,6 @@ YBCExecWriteStmt(YbcPgStatement ybc_stmt,
 			 * Section 2 contains relations in relcache init file but
 			 * do not support sys cache. Should be kept in sync with
 			 * YbRelationIdIsInInitFileAndNotCached.
-			 * As of 2023-11-27, SECURITY LABEL command is not supported.
-			 * Add SharedSecLabelRelationId, SharedSecLabelObjectIndexId
-			 * to section 2 when SECURITY LABEL command is supported.
 			 */
 			Assert(relid == AuthIdRelationId ||
 				   relid == AuthIdRolnameIndexId ||
@@ -288,8 +282,9 @@ YBCExecWriteStmt(YbcPgStatement ybc_stmt,
 				   relid == AuthMemMemRoleIndexId ||
 				   relid == DatabaseRelationId ||
 				   relid == TableSpaceRelationId ||
-
-				   relid == DatabaseNameIndexId);
+				   relid == DatabaseNameIndexId ||
+				   relid == SharedSecLabelRelationId ||
+				   relid == SharedSecLabelObjectIndexId);
 
 			YbSetIsGlobalDDL();
 		}
@@ -560,19 +555,37 @@ YbIsInsertOnConflictReadBatchingPossible(ResultRelInfo *resultRelInfo)
 	/*
 	 * TODO(jason): figure out how to enable triggers.
 	 */
-	return (yb_insert_on_conflict_read_batch_size > 0 &&
-			IsYBRelation(resultRelInfo->ri_RelationDesc) &&
-			!IsCatalogRelation(resultRelInfo->ri_RelationDesc) &&
-			!(resultRelInfo->ri_TrigDesc &&
-			  (resultRelInfo->ri_TrigDesc->trig_delete_after_row ||
-			   resultRelInfo->ri_TrigDesc->trig_delete_before_row ||
-			   resultRelInfo->ri_TrigDesc->trig_delete_instead_row ||
-			   resultRelInfo->ri_TrigDesc->trig_insert_after_row ||
-			   resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
-			   resultRelInfo->ri_TrigDesc->trig_insert_instead_row ||
-			   resultRelInfo->ri_TrigDesc->trig_update_after_row ||
-			   resultRelInfo->ri_TrigDesc->trig_update_before_row ||
-			   resultRelInfo->ri_TrigDesc->trig_update_instead_row)));
+	if (yb_insert_on_conflict_read_batch_size == 0 ||
+		!IsYBRelation(resultRelInfo->ri_RelationDesc) ||
+		IsCatalogRelation(resultRelInfo->ri_RelationDesc) ||
+		(resultRelInfo->ri_TrigDesc &&
+		 (resultRelInfo->ri_TrigDesc->trig_delete_before_row ||
+		  resultRelInfo->ri_TrigDesc->trig_delete_instead_row ||
+		  resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
+		  resultRelInfo->ri_TrigDesc->trig_insert_instead_row ||
+		  resultRelInfo->ri_TrigDesc->trig_update_before_row ||
+		  resultRelInfo->ri_TrigDesc->trig_update_instead_row)))
+	{
+		return false;
+	}
+
+	TriggerDesc *trigdesc = resultRelInfo->ri_TrigDesc;
+	if (!(trigdesc && (trigdesc->trig_delete_after_row ||
+					   trigdesc->trig_insert_after_row ||
+					   trigdesc->trig_update_after_row)))
+		return true;
+
+	/* Any non-FK after row triggers make batching not supported. */
+	for (int i = 0; i < trigdesc->numtriggers; i++)
+	{
+		Trigger    *trig = &trigdesc->triggers[i];
+
+		if (TRIGGER_FOR_AFTER(trig->tgtype) &&
+			TRIGGER_FOR_ROW(trig->tgtype) &&
+			RI_FKey_trigger_type(trig->tgfoid) == RI_TRIGGER_NONE)
+			return false;
+	}
+	return true;
 }
 
 /*
@@ -1526,6 +1539,24 @@ YBCRelInfoHasSecondaryIndices(ResultRelInfo *resultRelInfo)
 	return (resultRelInfo->ri_NumIndices > 1 ||
 			(resultRelInfo->ri_NumIndices == 1 &&
 			 !resultRelInfo->ri_IndexRelationDescs[0]->rd_index->indisprimary));
+}
+
+int
+YBCRelInfoGetSecondaryIndicesCount(ResultRelInfo *resultRelInfo)
+{
+	int count = 0;
+	for (int i = 0; i < resultRelInfo->ri_NumIndices; i++)
+	{
+		Relation index = resultRelInfo->ri_IndexRelationDescs[i];
+		if (index->rd_index->indisprimary)
+		{
+			continue;
+		}
+
+		++count;
+	}
+
+	return count;
 }
 
 /*

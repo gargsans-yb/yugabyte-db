@@ -324,6 +324,7 @@ public class NodeConfigValidator {
       case GSUTIL:
       case S3CMD:
       case YB_HOME_DIR_CLEAN:
+      case NTP_SKEW:
       case DATA_DIR_CLEAN:
         {
           return Boolean.parseBoolean(nodeConfig.getValue());
@@ -488,7 +489,7 @@ public class NodeConfigValidator {
         nodeAgentClient.ping(nodeAgent);
         return true;
       } catch (RuntimeException e) {
-        log.error("Failed to connect to node agent {} - {}", nodeAgent.getUuid(), e.getMessage());
+        log.error("Failed to connect to node agent {} - {}", nodeAgent, e.getMessage());
       }
     }
     return false;

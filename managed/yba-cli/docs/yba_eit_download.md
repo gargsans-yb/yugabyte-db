@@ -13,8 +13,8 @@ yba eit download [flags]
 ### Options
 
 ```
-  -c, --cert-type string   [Optional] Type of the certificate. Client certifcates cannot be downloaded for K8sCertManager or CustomCertHostPath. Allowed values (case sensitive): SelfSigned, CustomCertHostPath, HashicorpVault, K8sCertManager.
   -n, --name string        [Required] Name of the configuration.
+  -c, --cert-type string   [Optional] Type of the certificate. Client certifcates cannot be downloaded for K8sCertManager or CustomCertHostPath. Allowed values (case sensitive): SelfSigned, CustomCertHostPath, HashicorpVault, K8sCertManager.
   -h, --help               help for download
 ```
 
@@ -22,8 +22,9 @@ yba eit download [flags]
 
 ```
   -a, --apiToken string    YugabyteDB Anywhere api token.
-      --config string      Config file, defaults to $HOME/.yba-cli.yaml
+      --config string      Full path to a specific configuration file for YBA CLI. If provided, this takes precedence over the directory specified via --directory, and the generated files are added to the same path. If not provided, the CLI will look for '.yba-cli.yaml' in the directory specified by --directory. Defaults to '$HOME/.yba-cli/.yba-cli.yaml'.
       --debug              Use debug mode, same as --logLevel debug.
+      --directory string   Directory containing YBA CLI configuration and generated files. If specified, the CLI will look for a configuration file named '.yba-cli.yaml' in this directory. Defaults to '$HOME/.yba-cli/'.
       --disable-color      Disable colors in output. (default false)
   -H, --host string        YugabyteDB Anywhere Host (default "http://localhost:9000")
   -l, --logLevel string    Select the desired log level format. Allowed values: debug, info, warn, error, fatal. (default "info")

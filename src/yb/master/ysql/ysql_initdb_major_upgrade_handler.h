@@ -23,6 +23,7 @@ namespace yb {
 
 class IsOperationDoneResult;
 class ThreadPool;
+class VersionInfoPB;
 
 namespace master {
 struct LeaderEpoch;
@@ -73,6 +74,13 @@ class YsqlInitDBAndMajorUpgradeHandler {
   // The upgrade is completed after it has been finalized.
   // During the upgrade only is_forced_update operations are allowed.
   bool IsWriteToCatalogTableAllowed(const TableId& table_id, bool is_forced_update) const;
+
+  // Delete the previous ysql major version catalog after the upgrade to the new version has
+  // completed.
+  Status CleanupPreviousYsqlMajorCatalog(const LeaderEpoch& epoch);
+  void ScheduleCleanupPreviousYsqlMajorCatalog(const LeaderEpoch& epoch);
+
+  Status ValidateTServerVersion(const VersionInfoPB& version) const;
 
  private:
   using DbNameToOidList = std::vector<std::pair<std::string, YbcPgOid>>;

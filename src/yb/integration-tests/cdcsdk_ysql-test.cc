@@ -7033,7 +7033,13 @@ TEST_F(CDCSDKYsqlTest, YB_DISABLE_TEST_IN_TSAN(TestGetCheckpointOnStreamedColoca
     ASSERT_OK(conn.ExecuteFormat("INSERT INTO test1 VALUES ($0, $1, $2)", i, i + 1, i + 2));
   }
 
-  auto req_table_id = GetColocatedTableId("test1");
+  std::string req_table_id;
+  ASSERT_OK(WaitFor(
+      [&]() -> Result<bool> {
+        req_table_id = GetColocatedTableId("test1");
+        return !req_table_id.empty();
+      },
+      MonoDelta::FromSeconds(5), "Waiting for colocated table ID to be available"));
   ASSERT_NE(req_table_id, "");
   auto change_resp = ASSERT_RESULT(GetChangesFromCDCSnapshot(stream_id, tablets));
   while (true) {
@@ -8213,6 +8219,127 @@ TEST_F(CDCSDKYsqlTest, TestReplicationSlotLsnTypePresentAfterRestart) {
           .Get(0)
           .cdc_stream_info_options()
           .cdcsdk_ysql_replication_slot_lsn_type());
+}
+
+TEST_F(CDCSDKYsqlTest, TestPgCreateReplicationSlotDefaultOrderingMode) {
+  ASSERT_OK(SET_FLAG(ysql_yb_allow_replication_slot_ordering_modes, true));
+  ASSERT_OK(
+      SetUpWithParams(3 /* replication_factor */, 1 /* num_masters */, false));
+
+  auto conn = ASSERT_RESULT(test_cluster_.ConnectToDBWithReplication(kNamespaceName));
+
+  ASSERT_OK(conn.Execute(
+      "create table test_table (id int primary key, name text, l_name varchar, hours float);"));
+
+  ASSERT_OK(conn.Execute("create publication pub for all tables;"));
+
+  auto result = ASSERT_RESULT(conn.Fetch("CREATE_REPLICATION_SLOT rs LOGICAL yboutput;"));
+
+  auto list_cdc_streams_resp = ASSERT_RESULT(ListDBStreams());
+
+  ASSERT_EQ(
+      ReplicationSlotOrderingMode::ReplicationSlotOrderingMode_TRANSACTION,
+      list_cdc_streams_resp.streams()
+          .Get(0)
+          .cdc_stream_info_options()
+          .cdcsdk_ysql_replication_slot_ordering_mode());
+}
+
+void CDCSDKYsqlTest::TestCreateReplicationSlotWithOrderingMode(const std::string ordering_mode) {
+  ASSERT_OK(SET_FLAG(ysql_yb_allow_replication_slot_ordering_modes, true));
+  ASSERT_OK(
+      SetUpWithParams(3 /* replication_factor */, 1 /* num_masters */, false));
+
+  auto conn = ASSERT_RESULT(test_cluster_.ConnectToDBWithReplication(kNamespaceName));
+
+  ASSERT_OK(conn.Execute(
+      "create table test_table (id int primary key, name text, l_name varchar, hours float);"));
+
+  ASSERT_OK(conn.Execute("create publication pub for all tables;"));
+
+  auto result = ASSERT_RESULT(
+      conn.Fetch("CREATE_REPLICATION_SLOT rs LOGICAL yboutput " + ordering_mode + ";"));
+
+  auto list_cdc_streams_resp = ASSERT_RESULT(ListDBStreams());
+
+  if (ordering_mode == "ROW") {
+    ASSERT_EQ(
+        ReplicationSlotOrderingMode::ReplicationSlotOrderingMode_ROW,
+        list_cdc_streams_resp.streams()
+            .Get(0)
+            .cdc_stream_info_options()
+            .cdcsdk_ysql_replication_slot_ordering_mode());
+  } else {
+    ASSERT_EQ(
+        ReplicationSlotOrderingMode::ReplicationSlotOrderingMode_TRANSACTION,
+        list_cdc_streams_resp.streams()
+            .Get(0)
+            .cdc_stream_info_options()
+            .cdcsdk_ysql_replication_slot_ordering_mode());
+  }
+}
+
+TEST_F(CDCSDKYsqlTest, TestCreateReplicationSlotWithOrderingModeRow) {
+  TestCreateReplicationSlotWithOrderingMode("ROW");
+}
+
+TEST_F(CDCSDKYsqlTest, TestCreateReplicationSlotWithOrderingModeTransaction) {
+  TestCreateReplicationSlotWithOrderingMode("TRANSACTION");
+}
+
+TEST_F(CDCSDKYsqlTest, TestReplicationSlotOrderingModePresentAfterRestart) {
+  ASSERT_OK(SET_FLAG(ysql_yb_allow_replication_slot_ordering_modes, true));
+  ASSERT_OK(
+      SetUpWithParams(3 /* replication_factor */, 1 /* num_masters */, false));
+
+  auto conn = ASSERT_RESULT(test_cluster_.ConnectToDBWithReplication(kNamespaceName));
+
+  ASSERT_OK(conn.Execute(
+      "create table test_table (id int primary key, name text, l_name varchar, hours float);"));
+
+  ASSERT_OK(conn.Execute("create publication pub for all tables;"));
+
+  auto result =
+      ASSERT_RESULT(conn.Fetch("CREATE_REPLICATION_SLOT rs LOGICAL yboutput ROW;"));
+
+  auto list_cdc_streams_resp = ASSERT_RESULT(ListDBStreams());
+
+  ASSERT_EQ(
+      ReplicationSlotOrderingMode::ReplicationSlotOrderingMode_ROW,
+      list_cdc_streams_resp.streams()
+          .Get(0)
+          .cdc_stream_info_options()
+          .cdcsdk_ysql_replication_slot_ordering_mode());
+
+  for (int idx = 0; idx < 3; idx++) {
+    test_cluster()->mini_tablet_server(idx)->Shutdown();
+    ASSERT_OK(test_cluster()->mini_tablet_server(idx)->Start());
+    ASSERT_OK(test_cluster()->mini_tablet_server(idx)->WaitStarted());
+  }
+
+  LOG(INFO) << "All tservers restarted";
+
+  list_cdc_streams_resp = ASSERT_RESULT(ListDBStreams());
+
+  ASSERT_EQ(
+      ReplicationSlotOrderingMode::ReplicationSlotOrderingMode_ROW,
+      list_cdc_streams_resp.streams()
+          .Get(0)
+          .cdc_stream_info_options()
+          .cdcsdk_ysql_replication_slot_ordering_mode());
+
+  // Restart master now.
+  test_cluster_.mini_cluster_->mini_master()->Shutdown();
+  ASSERT_OK(test_cluster_.mini_cluster_->StartMasters());
+
+  list_cdc_streams_resp = ASSERT_RESULT(ListDBStreams());
+
+  ASSERT_EQ(
+    ReplicationSlotOrderingMode::ReplicationSlotOrderingMode_ROW,
+      list_cdc_streams_resp.streams()
+          .Get(0)
+          .cdc_stream_info_options()
+          .cdcsdk_ysql_replication_slot_ordering_mode());
 }
 
 TEST_F(CDCSDKYsqlTest, TestPgPublicationDisabled) {
@@ -11669,6 +11796,46 @@ TEST_F(CDCSDKYsqlTest, TestGetChangesAfterMultipleTabletBootstrap) {
       stream_id, table, tablets, tablet_to_checkpoint, expected_records_size, true));
   LOG(INFO) << "Got " << received_records << " insert records";
   ASSERT_EQ(expected_records_size, received_records);
+}
+
+// The value of cdcsdk_flush_lag metric is always zero for gRPC streams.
+TEST_F(CDCSDKYsqlTest, TestCDCFlushLagMetricWithgRPCModel) {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_update_metrics_interval_ms) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_update_min_cdc_indices_interval_secs) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_cdc_state_checkpoint_update_interval_ms) = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_yb_enable_cdc_consistent_snapshot_streams) = true;
+  ASSERT_OK(SetUpWithParams(1, 1, false));
+
+  const uint32_t num_tablets = 1;
+  auto table = ASSERT_RESULT(CreateTable(&test_cluster_, kNamespaceName, kTableName, num_tablets));
+  google::protobuf::RepeatedPtrField<master::TabletLocationsPB> tablets;
+  ASSERT_OK(test_client()->GetTablets(table, 0, &tablets, /* partition_list_version =*/nullptr));
+  ASSERT_EQ(tablets.size(), num_tablets);
+
+  // Creat a consistent snapshot stream (gRPC stream).
+  auto stream_id = ASSERT_RESULT(CreateConsistentSnapshotStream());
+
+  const auto& tserver = test_cluster()->mini_tablet_server(0)->server();
+  auto cdc_service = CDCService(tserver);
+  ASSERT_OK(WaitFor(
+      [&]() { return cdc_service->CDCEnabled(); }, MonoDelta::FromSeconds(30), "IsCDCEnabled"));
+
+  // Insert 200 records and sleep to ensure some iterations of UpdateMetrics have taken place.
+  ASSERT_OK(WriteRowsHelper(1, 200, &test_cluster_, true));
+  SleepFor(MonoDelta::FromSeconds(3 * kTimeMultiplier));
+
+  // Assert that cdcsdk_flush_lag value is zero.
+  auto metrics =
+      ASSERT_RESULT(GetCDCSDKTabletMetrics(*cdc_service, tablets[0].tablet_id(), stream_id));
+  ASSERT_EQ(metrics->cdcsdk_flush_lag->value(), 0);
+
+  // Insert another 100 records and sleep to ensure some iterations of UpdateMetrics have taken
+  // place.
+  ASSERT_OK(WriteRowsHelper(200, 300, &test_cluster_, true));
+  SleepFor(MonoDelta::FromSeconds(3 * kTimeMultiplier));
+
+  // Assert that cdcsdk_flush_lag value remains zero.
+  ASSERT_EQ(metrics->cdcsdk_flush_lag->value(), 0);
 }
 
 }  // namespace cdc

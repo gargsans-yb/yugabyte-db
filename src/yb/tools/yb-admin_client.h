@@ -37,6 +37,8 @@
 #include <boost/optional.hpp>
 
 #include "yb/cdc/cdc_service.pb.h"
+#include "yb/cdc/xcluster_types.h"
+
 #include "yb/client/client.h"
 #include "yb/client/yb_table_name.h"
 
@@ -331,6 +333,8 @@ class ClusterAdminClient {
 
   Status GetYsqlMajorCatalogUpgradeState();
 
+  Status FinalizeUpgrade(bool use_single_connection);
+
   // Set WAL retention time in secs for a table name.
   Status SetWalRetentionSecs(
     const client::YBTableName& table_name, const uint32_t wal_ret_secs);
@@ -339,8 +343,7 @@ class ClusterAdminClient {
 
   Status GetAutoFlagsConfig();
 
-  Status PromoteAutoFlags(
-      const std::string& max_flag_class, const bool promote_non_runtime_flags, const bool force);
+  Status PromoteAutoFlags(const std::string& max_flag_class, const bool force);
 
   Status RollbackAutoFlags(uint32_t rollback_version);
 

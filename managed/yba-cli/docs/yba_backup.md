@@ -20,8 +20,9 @@ yba backup [flags]
 
 ```
   -a, --apiToken string    YugabyteDB Anywhere api token.
-      --config string      Config file, defaults to $HOME/.yba-cli.yaml
+      --config string      Full path to a specific configuration file for YBA CLI. If provided, this takes precedence over the directory specified via --directory, and the generated files are added to the same path. If not provided, the CLI will look for '.yba-cli.yaml' in the directory specified by --directory. Defaults to '$HOME/.yba-cli/.yba-cli.yaml'.
       --debug              Use debug mode, same as --logLevel debug.
+      --directory string   Directory containing YBA CLI configuration and generated files. If specified, the CLI will look for a configuration file named '.yba-cli.yaml' in this directory. Defaults to '$HOME/.yba-cli/'.
       --disable-color      Disable colors in output. (default false)
   -H, --host string        YugabyteDB Anywhere Host (default "http://localhost:9000")
   -l, --logLevel string    Select the desired log level format. Allowed values: debug, info, warn, error, fatal. (default "info")
@@ -38,6 +39,7 @@ yba backup [flags]
 * [yba backup describe](yba_backup_describe.md)	 - Describe a YugabyteDB Anywhere universe backup
 * [yba backup list](yba_backup_list.md)	 - List YugabyteDB Anywhere backups
 * [yba backup list-increments](yba_backup_list-increments.md)	 - List the incremental backups of a backup
+* [yba backup pitr](yba_backup_pitr.md)	 - Manage YugabyteDB Anywhere universe PITR configs
 * [yba backup restore](yba_backup_restore.md)	 - Manage YugabyteDB Anywhere universe backup restores
 * [yba backup schedule](yba_backup_schedule.md)	 - Manage YugabyteDB Anywhere universe backup schedules
 * [yba backup update](yba_backup_update.md)	 - Edit a YugabyteDB Anywhere universe backup

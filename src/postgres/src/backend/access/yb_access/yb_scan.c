@@ -20,55 +20,55 @@
  *
  *--------------------------------------------------------------------------------------------------
  */
+#include "postgres.h"
 
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
-#include "postgres.h"
 
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/nbtree.h"
+#include "access/relation.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "access/yb_pg_inherits_scan.h"
-#include "commands/dbcommands.h"
-#include "commands/tablegroup.h"
+#include "access/yb_scan.h"
+#include "catalog/catalog.h"
+#include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
-#include "catalog/catalog.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
 #include "catalog/pg_type.h"
+#include "catalog/yb_type.h"
+#include "commands/dbcommands.h"
+#include "commands/yb_tablegroup.h"
 #include "miscadmin.h"
-#include "access/relation.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/paths.h"
+#include "pg_yb_utils.h"
 #include "pgstat.h"
 #include "postmaster/bgworker_internals.h"	/* for MAX_PARALLEL_WORKER_LIMIT */
 #include "utils/datum.h"
-#include "utils/rel.h"
+#include "utils/elog.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/resowner_private.h"
-#include "utils/syscache.h"
 #include "utils/selfuncs.h"
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
-
-/* Yugabyte includes */
-#include "yb/yql/pggate/ybc_pggate.h"
-#include "pg_yb_utils.h"
-#include "access/nbtree.h"
-#include "access/yb_scan.h"
-#include "catalog/yb_type.h"
-#include "utils/elog.h"
+#include "utils/syscache.h"
 #include "utils/typcache.h"
+#include "yb/yql/pggate/ybc_pggate.h"
 
 typedef struct YbAttnumBmsState
 {
@@ -226,20 +226,8 @@ ybcLoadTableInfo(Relation relation, YbScanPlan scan_plan)
 static Oid
 ybc_get_atttypid(TupleDesc bind_desc, AttrNumber attnum)
 {
-	Oid			atttypid;
-
-	if (attnum > 0)
-	{
-		/* Get the type from the description */
-		atttypid = TupleDescAttr(bind_desc, attnum - 1)->atttypid;
-	}
-	else
-	{
-		/* This must be an OID column. */
-		atttypid = OIDOID;
-	}
-
-	return atttypid;
+	return attnum > 0 ? TupleDescAttr(bind_desc, attnum - 1)->atttypid :
+						SystemAttributeDefinition(attnum)->atttypid;
 }
 
 /*
@@ -584,16 +572,14 @@ ybcFetchNextHeapTuple(YbScanDesc ybScan, ScanDirection dir)
 
 		if (status && !IsolationIsSerializable())
 		{
-			const uint16_t txn_error = YBCStatusTransactionError(status);
+			const uint32_t err_code = YBCStatusPgsqlError(status);
 
-			if (ybScan->exec_params != NULL && YBCIsTxnConflictError(txn_error))
+			if (ybScan->exec_params != NULL && err_code == ERRCODE_YB_TXN_CONFLICT)
 			{
 				elog(DEBUG2, "Error when trying to lock row. "
-					 "pg_wait_policy=%d docdb_wait_policy=%d "
-					 "txn_errcode=%d message=%s",
+					 "pg_wait_policy=%d docdb_wait_policy=%d message=%s",
 					 ybScan->exec_params->pg_wait_policy,
 					 ybScan->exec_params->docdb_wait_policy,
-					 txn_error,
 					 YBCStatusMessageBegin(status));
 				YBCFreeStatus(status);
 				status = NULL;
@@ -604,11 +590,10 @@ ybcFetchNextHeapTuple(YbScanDesc ybScan, ScanDirection dir)
 									RelationGetRelationName(tsdesc->rs_rd))));
 				else
 					ereport(ERROR,
-							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-							 errmsg("could not serialize access due to concurrent update"),
-							 yb_txn_errcode(YBCGetTxnConflictErrorCode())));
+							(errcode(ERRCODE_YB_TXN_CONFLICT),
+							 errmsg("could not serialize access due to concurrent update")));
 			}
-			else if (YBCIsTxnSkipLockingError(txn_error))
+			else if (err_code == ERRCODE_YB_TXN_SKIP_LOCKING)
 			{
 				/* For skip locking, it's correct to simply return no results. */
 				has_data = false;
@@ -755,6 +740,9 @@ ybcFetchNextIndexTuple(YbScanDesc ybScan, ScanDirection dir)
 					INDEXTUPLE_YBCTID(tuple) = PointerGetDatum(syscols.ybbasectid);
 					ybcUpdateFKCache(ybScan, INDEXTUPLE_YBCTID(tuple));
 				}
+				if (syscols.ybuniqueidxkeysuffix != NULL)
+						tuple->t_ybuniqueidxkeysuffix =
+							PointerGetDatum(syscols.ybuniqueidxkeysuffix);
 			}
 			break;
 		}
@@ -777,9 +765,59 @@ ybcCalculateIndexRelfileNodeId(Relation rel, Relation index,
 	if (!index->rd_index->indisprimary)
 		return YbGetRelfileNodeId(index);
 	else if (params->index_only_scan ||
-			 YBCIsNonColocatedYbctidsOnlyFetch(params))
+			 YBCIsNonembeddedYbctidsOnlyFetch(params))
 		return YbGetRelfileNodeId(rel);
 	return InvalidOid;
+}
+
+/*
+ * True if the scan involving table and index is such that the index data is
+ * sharded together with the table.
+ * TODO(#25940): this logic is not completely clean, as indicated by the
+ * todos below.
+ */
+bool
+YbIsScanningEmbeddedIdx(Relation table, Relation index)
+{
+	YbcTableProperties yb_table_properties_table;
+	bool		is_embedded;
+
+	yb_table_properties_table = YbGetTableProperties(table);
+
+	/*
+	 * - All system tables and indexes are specially colocated to the sys
+	 *   catalog tablet.
+	 * - Some indexes may use copartitioning, which shards the table and index
+	 *   together.
+	 */
+	is_embedded = (IsSystemRelation(table) ||
+				   yb_table_properties_table->is_colocated ||
+				   (index && index->rd_indam->yb_amiscopartitioned));
+
+	/*
+	 * - If ysql_enable_colocated_tables_with_tablespaces, check that the table
+	 *   and index are in the same colocation tablet using tablegroup_oid.
+	 *   - TODO(#25940): index->rd_index->indisprimary seems irrelevant and
+	 *     should not be a pass condition.
+	 * - Else, simply check for colocation of the table because the index
+	 *   should follow the table.
+	 *   - TODO(#25940): index being NULL or pk index should not be a pass
+	 *     condition.
+	 * - TODO(#25940): the gflag could be turned on/off in the lifetime of
+	 *   a cluster, so it shouldn't even be involved in this logic.  Everything
+	 *   should be validated, likely using the tablegroup_oid check, assuming
+	 *   that holds even when indexes are created when the flag is false.
+	 */
+	if (*YBCGetGFlags()->ysql_enable_colocated_tables_with_tablespaces)
+		is_embedded &= (yb_table_properties_table->is_colocated &&
+						((index && index->rd_index->indisprimary) ||
+						 (index &&
+						  (YbGetTableProperties(index)->tablegroup_oid ==
+						   yb_table_properties_table->tablegroup_oid))));
+	else
+		is_embedded |= yb_table_properties_table->is_colocated;
+
+	return is_embedded;
 }
 
 /*
@@ -817,54 +855,12 @@ ybcSetupScanPlan(bool xs_want_itup, YbScanDesc ybScan, YbScanPlan scan_plan)
 	TableScanDesc tsdesc = (TableScanDesc) ybScan;
 	Relation	relation = tsdesc->rs_rd;
 	Relation	index = ybScan->index;
-	YbcTableProperties yb_table_prop_relation = YbGetTableProperties(relation);
-	bool		is_colocated_tables_with_tablespace_enabled =
-	*YBCGetGFlags()->ysql_enable_colocated_tables_with_tablespaces;
 	int			i;
 
 	memset(scan_plan, 0, sizeof(*scan_plan));
 
-	/*
-	 * Setup control-parameters for Yugabyte preparing statements for different
-	 * types of scan.
-	 * - "querying_colocated_table": Support optimizations for (system,
-	 *   user database and tablegroup) colocated tables
-	 * - "index_oid, index_only_scan": Different index
-	 *   scans.
-	 * - This is also used to do index-scans on copartitioned indexes, which
-	 *   are technically a special case of colocated indexes.
-	 * NOTE: Primary index is a special case as there isn't a primary index
-	 * table in YugaByte.
-	 */
-
-	/*
-	 * We always query a colocated table if we are scanning a copartitioned
-	 * index or a system table.
-	 */
-	ybScan->prepare_params.querying_colocated_table =
-		IsSystemRelation(relation) ||
-		(index && index->rd_indam->yb_amiscopartitioned);
-
-	if (!is_colocated_tables_with_tablespace_enabled)
-	{
-		ybScan->prepare_params.querying_colocated_table |=
-			yb_table_prop_relation->is_colocated;
-	}
-	else
-	{
-		/*
-		 * If ysql_enable_colocated_tables_with_tablespaces is enabled then we enable
-		 * querying_colocated_table for the following cases:
-		 * 	1. If the relation is a system catalog or TOAST table (already set above).
-		 *	2. If the index used for scan is a primary key index of the colocated table.
-		 * 	3. If the base table and it's index are part of the same tablegroup.
-		 */
-		ybScan->prepare_params.querying_colocated_table |=
-			(yb_table_prop_relation->is_colocated && index &&
-			 (index->rd_index->indisprimary ||
-			  yb_table_prop_relation->tablegroup_oid ==
-			  YbGetTableProperties(index)->tablegroup_oid));
-	}
+	ybScan->prepare_params.embedded_idx = YbIsScanningEmbeddedIdx(relation,
+																  index);
 
 	if (index)
 	{
@@ -1244,6 +1240,7 @@ ybcSetupScanKeys(YbScanDesc ybScan, YbScanPlan scan_plan)
 	/*
 	 * Find the scan keys that are the primary key.
 	 */
+	bool sk_cols_has_ybctid = false;
 	for (int i = 0; i < ybScan->nkeys; i++)
 	{
 		const AttrNumber attnum = scan_plan->bind_key_attnums[i];
@@ -1253,6 +1250,11 @@ ybcSetupScanKeys(YbScanDesc ybScan, YbScanPlan scan_plan)
 
 		int			idx = YBAttnumToBmsIndex(scan_plan->target_relation, attnum);
 
+		if (attnum == YBTupleIdAttributeNumber)
+		{
+			sk_cols_has_ybctid = true;
+			scan_plan->sk_cols = bms_add_member(scan_plan->sk_cols, idx);
+		}
 		/*
 		 * TODO: Can we have bound keys on non-pkey columns here?
 		 *       If not we do not need the is_primary_key below.
@@ -1267,12 +1269,14 @@ ybcSetupScanKeys(YbScanDesc ybScan, YbScanPlan scan_plan)
 	}
 
 	/*
-	 * If hash key is not fully set, we must do a full-table scan so clear all
-	 * the scan keys if the hash code was explicitly specified as a
-	 * scan key then we also shouldn't be clearing the scan keys
+	 * If hash key is not fully set and ybctid is not set either, we must do a
+	 * full-table scan so clear all the scan keys if the hash code was
+	 * explicitly specified as a scan key then we also shouldn't be clearing the
+	 * scan keys.
 	 */
 	if (ybScan->hash_code_keys == NIL &&
-		!bms_is_subset(scan_plan->hash_key, scan_plan->sk_cols))
+		!bms_is_subset(scan_plan->hash_key, scan_plan->sk_cols) &&
+		!sk_cols_has_ybctid)
 	{
 		bms_free(scan_plan->sk_cols);
 		scan_plan->sk_cols = NULL;
@@ -1911,6 +1915,11 @@ YbBindSearchArray(YbScanDesc ybScan, YbScanPlan scan_plan,
 		ybcBindTupleExprCondIn(ybScan, scan_plan->bind_desc,
 							   length_of_key - 1, attnums,
 							   num_elems, elem_values);
+	}
+	else if (scan_plan->bind_key_attnums[i] == YBTupleIdAttributeNumber)
+	{
+		Assert(num_elems == num_valid);
+		YBCPgBindYbctids(ybScan->handle, num_elems, elem_values);
 	}
 	else
 		ybcBindColumnCondIn(ybScan, scan_plan->bind_desc,
@@ -2683,7 +2692,7 @@ ybcBuildRequiredAttrs(YbScanDesc yb_scan, YbScanPlan scan_plan,
 
 	YbAttnumBmsState result = ybcAttnumBmsConstruct();
 
-	if (YBCIsNonColocatedYbctidsOnlyFetch(params))
+	if (YBCIsNonembeddedYbctidsOnlyFetch(params))
 	{
 		ybcAttnumBmsAdd(&result, YBIdxBaseTupleIdAttributeNumber);
 		return result;
@@ -2809,7 +2818,8 @@ ybcSetupTargets(YbScanDesc yb_scan, YbScanPlan scan_plan, Scan *pg_scan_plan)
  * attribute numbers from table-based numbers to index-based ones.
  */
 void
-YbDmlAppendTargetsAggregate(List *aggrefs, TupleDesc tupdesc, Relation index,
+YbDmlAppendTargetsAggregate(List *aggrefs, Scan *outer_plan,
+							TupleDesc tupdesc, Relation index,
 							bool xs_want_itup, YbcPgStatement handle)
 {
 	ListCell   *lc;
@@ -2878,18 +2888,27 @@ YbDmlAppendTargetsAggregate(List *aggrefs, TupleDesc tupdesc, Relation index,
 				}
 				else if (IsA(tle->expr, Var))
 				{
+					Var *var = castNode(Var, tle->expr);
+					int attno = var->varattno;
 					/*
-					 * Use original attribute number (varoattno) instead of projected one (varattno)
-					 * as projection is disabled for tuples produced by pushed down operators.
+					 * Change column reference in an aggregate to attribute
+					 * number. Given limited number of cases we support, we
+					 * take a number of assumptions here: the outer plan is a
+					 * plain Scan, and the scan's target list contains only
+					 * simple Vars.
+					 * Support for more generic plan shapes would require
+					 * deep rework of Postgres/PgGate interactions.
 					 */
-					int			attno = castNode(Var, tle->expr)->varattnosyn;
-
-					/*
-					 * For index only scans, translate the table-based
-					 * attribute number to an index-based one.
-					 */
-					if (index && xs_want_itup)
-						attno = YbGetIndexAttnum(index, attno);
+					if (outer_plan)
+					{
+						List *tlist = outer_plan->plan.targetlist;
+						Assert(var->varno == OUTER_VAR);
+						Assert(attno > 0);
+						Assert(attno <= list_length(tlist));
+						TargetEntry *scan_tle = list_nth_node(TargetEntry, tlist, attno - 1);
+						Assert(IsA(scan_tle->expr, Var));
+						attno = castNode(Var, scan_tle->expr)->varattno;
+					}
 					Form_pg_attribute attr = TupleDescAttr(tupdesc, attno - 1);
 					YbcPgTypeAttrs type_attrs = {attr->atttypmod};
 
@@ -3112,8 +3131,8 @@ ybcBeginScan(Relation relation,
 	 * non-aggregate and aggregate targets.
 	 */
 	if (aggrefs != NIL)
-		YbDmlAppendTargetsAggregate(aggrefs, ybScan->target_desc, index,
-									xs_want_itup, ybScan->handle);
+		YbDmlAppendTargetsAggregate(aggrefs, pg_scan_plan, ybScan->target_desc,
+									index, xs_want_itup, ybScan->handle);
 	else
 		ybcSetupTargets(ybScan, &scan_plan, pg_scan_plan);
 
@@ -3697,7 +3716,7 @@ yb_is_hashed(Expr *clause, IndexOptInfo *index)
 		leftop = get_leftop(clause);
 		if (IsA(leftop, FuncExpr))
 		{
-			is_hashed = (((FuncExpr *) leftop)->funcid == YB_HASH_CODE_OID);
+			is_hashed = (((FuncExpr *) leftop)->funcid == F_YB_HASH_CODE);
 			ListCell   *ls;
 
 			if (is_hashed)
@@ -3956,9 +3975,8 @@ YBCHandleConflictError(Relation rel, LockWaitPolicy wait_policy)
 	{
 		/*
 		 * In case the user has specified NOWAIT, the intention is to error out
-		 * immediately. If we raise TransactionErrorCode::kConflict, the
-		 * statement might be retried by our retry logic in
-		 * yb_attempt_to_restart_on_error().
+		 * immediately. If we raise ERRCODE_YB_TXN_CONFLICT, the statement might
+		 * be retried by our retry logic in yb_attempt_to_restart_on_error().
 		 */
 
 		if (rel)
@@ -3980,18 +3998,17 @@ YBCHandleConflictError(Relation rel, LockWaitPolicy wait_policy)
 	}
 
 	ereport(ERROR,
-			(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-			 errmsg("could not serialize access due to concurrent update"),
-			 yb_txn_errcode(YBCGetTxnConflictErrorCode())));
+			(errcode(ERRCODE_YB_TXN_CONFLICT),
+			 errmsg("could not serialize access due to concurrent update")));
 }
 
 static bool
 YBCIsExplicitRowLockConflictStatus(YbcStatus status)
 {
 	Assert(status);
-	const uint16_t txn_error = YBCStatusTransactionError(status);
+	const uint32_t err_code = YBCStatusPgsqlError(status);
 
-	return YBCIsTxnConflictError(txn_error) || YBCIsTxnAbortedError(txn_error);
+	return err_code == ERRCODE_YB_TXN_CONFLICT || err_code == ERRCODE_YB_TXN_ABORTED;
 }
 
 static void
@@ -4063,7 +4080,7 @@ YBCLockTuple(Relation relation, Datum ybctid, RowMarkType mode,
 		estate->yb_exec_params.stmt_in_txn_limit_ht_for_reads;
 
 	TM_Result	res = TM_Ok;
-	MemoryContext exec_context = GetCurrentMemoryContext();
+	MemoryContext exec_context = CurrentMemoryContext;
 
 	PG_TRY();
 	{
@@ -4090,13 +4107,13 @@ YBCLockTuple(Relation relation, Datum ybctid, RowMarkType mode,
 		ErrorData  *edata = CopyErrorData();
 
 		elog(DEBUG2, "Error when trying to lock row. "
-			 "pg_wait_policy=%d docdb_wait_policy=%d txn_errcode=%d message=%s",
+			 "pg_wait_policy=%d docdb_wait_policy=%d message=%s",
 			 lock_params.pg_wait_policy, lock_params.docdb_wait_policy,
-			 edata->yb_txn_errcode, edata->message);
+			 edata->message);
 
-		if (YBCIsTxnConflictError(edata->yb_txn_errcode))
+		if (edata->sqlerrcode == ERRCODE_YB_TXN_CONFLICT)
 			res = TM_Updated;
-		else if (YBCIsTxnSkipLockingError(edata->yb_txn_errcode))
+		else if (edata->sqlerrcode == ERRCODE_YB_TXN_SKIP_LOCKING)
 			res = TM_WouldBlock;
 		else
 		{

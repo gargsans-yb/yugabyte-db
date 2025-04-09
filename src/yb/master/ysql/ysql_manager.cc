@@ -15,10 +15,15 @@
 
 #include "yb/client/schema.h"
 #include "yb/client/yb_table_name.h"
-#include "yb/tserver/ysql_advisory_lock_table.h"
+
+#include "yb/common/schema_pbutil.h"
 
 #include "yb/master/catalog_manager.h"
+#include "yb/master/master_defaults.h"
 #include "yb/master/ysql/ysql_initdb_major_upgrade_handler.h"
+
+#include "yb/tserver/ysql_advisory_lock_table.h"
+
 #include "yb/util/flag_validators.h"
 #include "yb/util/is_operation_done_result.h"
 
@@ -238,6 +243,10 @@ Status YsqlManager::ValidateWriteToCatalogTableAllowed(
       "YSQL DDLs, and catalog modifications are not allowed during a major YSQL upgrade");
 
   return Status::OK();
+}
+
+Status YsqlManager::ValidateTServerVersion(const VersionInfoPB& version) const {
+  return ysql_initdb_and_major_upgrade_helper_->ValidateTServerVersion(version);
 }
 
 }  // namespace yb::master

@@ -49,18 +49,19 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-/* YB includes. */
+/* YB includes */
 #include "access/heapam.h"
 #include "access/htup_details.h"
-#include "catalog/pg_yb_tablegroup.h"
 #include "catalog/pg_yb_catalog_version.h"
+#include "catalog/pg_yb_invalidation_messages.h"
 #include "catalog/pg_yb_logical_client_version.h"
 #include "catalog/pg_yb_profile.h"
 #include "catalog/pg_yb_role_profile.h"
+#include "catalog/pg_yb_tablegroup.h"
 #include "commands/defrem.h"
+#include "pg_yb_utils.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
-#include "pg_yb_utils.h"
 
 /*
  * Parameters to determine when to emit a log message in
@@ -148,6 +149,36 @@ IsCatalogRelationOid(Oid relid)
 	 * OIDs; see GetNewObjectId().
 	 */
 	return (relid < (Oid) FirstUnpinnedObjectId);
+}
+
+/*
+ * IsInplaceUpdateRelation
+ *		True iff core code performs inplace updates on the relation.
+ *
+ *		This is used for assertions and for making the executor follow the
+ *		locking protocol described at README.tuplock section "Locking to write
+ *		inplace-updated tables".  Extensions may inplace-update other heap
+ *		tables, but concurrent SQL UPDATE on the same table may overwrite
+ *		those modifications.
+ *
+ *		The executor can assume these are not partitions or partitioned and
+ *		have no triggers.
+ */
+bool
+IsInplaceUpdateRelation(Relation relation)
+{
+	return IsInplaceUpdateOid(RelationGetRelid(relation));
+}
+
+/*
+ * IsInplaceUpdateOid
+ *		Like the above, but takes an OID as argument.
+ */
+bool
+IsInplaceUpdateOid(Oid relid)
+{
+	return (relid == RelationRelationId ||
+			relid == DatabaseRelationId);
 }
 
 /*
@@ -286,6 +317,7 @@ IsSharedRelation(Oid relationId)
 		relationId == SubscriptionRelationId ||
 		relationId == TableSpaceRelationId ||
 		relationId == YBCatalogVersionRelationId ||
+		relationId == YbInvalidationMessagesRelationId ||
 		relationId == YbProfileRelationId ||
 		relationId == YbRoleProfileRelationId ||
 		relationId == YBLogicalClientVersionRelationId)
@@ -311,6 +343,7 @@ IsSharedRelation(Oid relationId)
 		relationId == TablespaceNameIndexId ||
 		relationId == TablespaceOidIndexId ||
 		relationId == YBCatalogVersionDbOidIndexId ||
+		relationId == YbInvalidationMessagesIndexId ||
 		relationId == YbProfileOidIndexId ||
 		relationId == YbProfileRolnameIndexId ||
 		relationId == YbRoleProfileOidIndexId ||
@@ -564,8 +597,12 @@ GetNewOidWithIndex(Relation relation, Oid indexId, AttrNumber oidcolumn)
 	 * pg_upgrade; doing so would risk collisions with the OIDs it wants to
 	 * assign.  Hitting this assert means there's some path where we failed to
 	 * ensure that a type OID is determined by commands in the dump script.
+	 * YB: We may get here during extension upgrade (while executing
+	 * ALTER EXTENSION). Extension upgrade in YB is done as part of
+	 * pg_upgrade.
 	 */
-	Assert(!IsBinaryUpgrade || yb_binary_restore || RelationGetRelid(relation) != TypeRelationId);
+	Assert(!IsBinaryUpgrade || yb_binary_restore || RelationGetRelid(relation) != TypeRelationId
+		   || yb_extension_upgrade);
 
 	if (IsYugaByteEnabled())
 	{
@@ -642,8 +679,11 @@ GetNewRelFileNode(Oid reltablespace, Relation pg_class, char relpersistence)
 	 * If we ever get here during pg_upgrade, there's something wrong; all
 	 * relfilenode assignments during a binary-upgrade run should be
 	 * determined by commands in the dump script.
+	 * YB: We may get here during extension upgrade (while executing
+	 * ALTER EXTENSION). Extension upgrade in YB is done as part of
+	 * pg_upgrade.
 	 */
-	Assert(!IsBinaryUpgrade || yb_binary_restore);
+	Assert(!IsBinaryUpgrade || yb_binary_restore || yb_extension_upgrade);
 
 	/* This logic should match RelationInitPhysicalAddr */
 	rnode.node.spcNode = reltablespace ? reltablespace : MyDatabaseTableSpace;

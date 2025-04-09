@@ -17,6 +17,7 @@
 #include "yb/client/table_handle.h"
 #include "yb/client/yb_op.h"
 
+#include "yb/common/ql_value.h"
 #include "yb/integration-tests/external_mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
 
@@ -690,6 +691,9 @@ TEST_F(PgCronTest, CancelJobOnLeaderChange) {
   ASSERT_EQ(initial_nodes_running_job.size(), 1);
 
   ASSERT_OK(cluster_->MoveTabletLeader(tablet_id_));
+
+  // Wait for the jobs to get killed.
+  SleepFor(kJobListRefreshInterval * 1s);
 
   // Wait for the new leader to start running.
   const auto initial_row_count = ASSERT_RESULT(GetRowCount());

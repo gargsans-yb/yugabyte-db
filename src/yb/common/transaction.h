@@ -34,11 +34,7 @@
 #include "yb/common/hybrid_time.h"
 #include "yb/common/opid.h"
 
-#include "yb/gutil/template_util.h"
-
 #include "yb/util/enums.h"
-#include "yb/util/math_util.h"
-#include "yb/util/metrics.h"
 #include "yb/util/status_fwd.h"
 #include "yb/util/strongly_typed_uuid.h"
 #include "yb/util/uint_set.h"
@@ -49,7 +45,6 @@ YB_STRONGLY_TYPED_UUID_DECL(TransactionId);
 using TransactionIdSet = std::unordered_set<TransactionId, TransactionIdHash>;
 using TransactionIdApplyOpIdMap = std::unordered_map<TransactionId, OpId, TransactionIdHash>;
 using SubTransactionId = uint32_t;
-using TxnReuseVersion = uint64_t;
 // When session level advisory locks are enabled, we created a docdb transaction for a pg session
 // on a session advisory lock request, if one doesn't already exist. This transaction lives for the
 // lifetime of the pg session. The version is used to resolve failed waiting lock requests (probably

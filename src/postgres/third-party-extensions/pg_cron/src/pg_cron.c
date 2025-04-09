@@ -646,7 +646,7 @@ PgCronLauncherMain(Datum arg)
 	}
 
 
-	CronLoopContext = AllocSetContextCreate(GetCurrentMemoryContext(),
+	CronLoopContext = AllocSetContextCreate(CurrentMemoryContext,
 											  "pg_cron loop context",
 											  ALLOCSET_DEFAULT_MINSIZE,
 											  ALLOCSET_DEFAULT_INITSIZE,
@@ -1342,6 +1342,9 @@ PollForTasks(List *taskList)
 static bool
 CanStartTask(CronTask *task)
 {
+	if (IsYugaByteEnabled() && !ybIsLeader)
+		return false;
+
 	return task->state == CRON_TASK_WAITING && task->pendingRunCount > 0 &&
 		   RunningTaskCount < MaxRunningTasks;
 }
@@ -2161,11 +2164,11 @@ CronBackgroundWorker(Datum main_arg)
 	/* Set up a memory context and resource owner. */
 	Assert(CurrentResourceOwner == NULL);
 	CurrentResourceOwner = ResourceOwnerCreate(NULL, "pg_cron");
-	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												 "pg_cron worker",
-												 ALLOCSET_DEFAULT_MINSIZE,
-												 ALLOCSET_DEFAULT_INITSIZE,
-												 ALLOCSET_DEFAULT_MAXSIZE);
+	YbCurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
+												   "pg_cron worker",
+												   ALLOCSET_DEFAULT_MINSIZE,
+												   ALLOCSET_DEFAULT_INITSIZE,
+												   ALLOCSET_DEFAULT_MAXSIZE);
 
 	/* Set up a dynamic shared memory segment. */
 	seg = dsm_attach(DatumGetInt32(main_arg));
