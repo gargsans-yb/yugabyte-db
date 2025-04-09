@@ -1995,6 +1995,9 @@ components:
             total_size_sharded_tables: 1
             no_of_sharded_tables: 7
           recommendation_summary: recommendation_summary
+        notes:
+        - notes
+        - notes
         recommended_refactoring:
         - sql_object_type: sql_object_type
           invalid: 5
@@ -2112,6 +2115,10 @@ components:
         assessment_issues:
           items:
             $ref: '#/components/schemas/AssessmentCategoryInfo'
+          type: array
+        notes:
+          items:
+            type: string
           type: array
       title: Details of the migration assessment report
       type: object
@@ -3945,6 +3952,9 @@ components:
               total_size_sharded_tables: 1
               no_of_sharded_tables: 7
             recommendation_summary: recommendation_summary
+          notes:
+          - notes
+          - notes
           recommended_refactoring:
           - sql_object_type: sql_object_type
             invalid: 5
